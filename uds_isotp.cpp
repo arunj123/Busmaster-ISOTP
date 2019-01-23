@@ -123,6 +123,10 @@ GCC_EXTERN void GCC_EXPORT OnBus_Connect();
 GCC_EXTERN void GCC_EXPORT OnBus_Disconnect();
 GCC_EXTERN void GCC_EXPORT OnMsg_All(STCAN_MSG RxMsg);
 void Utils_TP_Cyclic_per_ecu(ECU_t *e);
+void Utils_GetUdsTpRxCCHandle(ECU_t *e);
+uint8_t Utils_GetUdsTpRxCCDataPos(ECU_t *e);
+uint8_t Utils_GetUdsTpRxCCSeqNo(ECU_t *e, uint8_t *f);
+void Utils_GetUdsTpRxFCHandle(ECU_t *e); 
 void Utils_GetUdsTpRxNewHandle(ECU_t *e, uint8_t *rxData);
 void Utils_TP_HandleRx(ECU_t *e);
 void Utils_TxHandleCF(ECU_t *e);
@@ -133,7 +137,8 @@ TpFcType_t Utils_GetUdsTpFCType(ECU_t *e, uint8_t *f);
 uint8_t Utils_GetUdsTpFCSTmin(ECU_t *e, uint8_t *f);
 uint16_t Utils_GetUdsTpFCBSize(ECU_t *e, uint8_t *f);
 void Utils_TxHandleFC(ECU_t *e);
-unsigned int Utils_GetSFMaxLen(ECU_t *e);
+uint8_t Utils_GetSFMaxLen(ECU_t *e);
+uint8_t Utils_GetFFMaxLen(ECU_t *e);
 void Utils_StartTpTx(ECU_t *e);
 void Utils_ClearTpData(ECU_t *e);
 bool Utils_SendTpResponse(EcuId_t ecu, uint8_t *data, uint16_t size);
@@ -202,7 +207,17 @@ void Utils_TP_Cyclic_per_ecu(ECU_t *e)
             Utils_TP_HandleRx(e);
             break;
         case TP_RX_ACTIVE:
-            Utils_TP_HandleRx(e);
+            switch(e->tp.rx.state) {
+                case TP_RX_FC_PENDING:
+                    Utils_GetUdsTpRxFCHandle(e);
+                break;
+                case TP_RX_CF_WAIT:
+                    Utils_GetUdsTpRxCCHandle(e);
+                break;
+                default:
+                    Utils_TP_HandleRx(e);
+                break;
+            }
         break;
 
         default:
@@ -216,6 +231,98 @@ void Utils_TP_Cyclic_per_ecu(ECU_t *e)
         }
     } 
 }/* End BUSMASTER generated function - Utils_TP_Cyclic_per_ecu */
+/* Start BUSMASTER generated function - Utils_GetUdsTpRxCCHandle */
+void Utils_GetUdsTpRxCCHandle(ECU_t *e)
+{
+    TpFrame_t ft;
+    if (e->msgBox.isAvailable) {
+        /* Read the type of frame from the received message data */
+        ft = Utils_GetUdsTpFrameType(e, e->msgBox.data);
+
+        if (CONSICUTIVE == ft) {
+            uint8_t SeqNo = Utils_GetUdsTpRxCCSeqNo(e, e->msgBox.data);
+            uint8_t datPtr = Utils_GetUdsTpRxCCDataPos(e);
+
+            /* if sequence number is same as expected */
+            if (SeqNo == (e->tp.CFcnt & 0x0F)) {
+                e->tp.timeCnt = 0;
+
+                memcpy(&e->tp.data[e->tp.dPtr], &e->msgBox.data[datPtr], 8 - datPtr);
+                e->tp.dPtr += (8 - datPtr);
+
+                if(e->tp.dPtr >= e->tp.len) {
+                    
+                    /* TODO: Indicate upper layer,
+                             Add error handling, possible abort in all unexpected frames */
+                    Trace( "Multiframe reception complete." );
+                    /* Mark state as inactive */
+                    e->tp.rx.state = TP_RX_INACTIVE;
+                }
+            }
+        }
+    }
+    else {
+
+        /* Increment timer and go to inactive, if timer expires */
+        e->tp.timeCnt++;
+        if (e->tp.timeCnt >= e->tp.WaitTime) {
+            e->tp.rx.state = TP_RX_INACTIVE;
+        }
+    }
+}/* End BUSMASTER generated function - Utils_GetUdsTpRxCCHandle */
+/* Start BUSMASTER generated function - Utils_GetUdsTpRxCCDataPos */
+uint8_t Utils_GetUdsTpRxCCDataPos(ECU_t *e)
+{
+    uint16_t ret;
+
+    if (TP_TYPE_STANDARD == e->tp.tpType) {
+        ret = 1;
+    }
+    else {
+        ret = 1; /* Check if necessary to change to 2*/
+    }
+    return ret;
+}/* End BUSMASTER generated function - Utils_GetUdsTpRxCCDataPos */
+/* Start BUSMASTER generated function - Utils_GetUdsTpRxCCSeqNo */
+uint8_t Utils_GetUdsTpRxCCSeqNo(ECU_t *e, uint8_t *f)
+{
+    uint16_t ret;
+
+    if (TP_TYPE_STANDARD == e->tp.tpType) {
+        ret = f[0] & 0x0F;
+    }
+    else {
+        ret = f[0] & 0x0F; /* Check if necessary to change to 1*/
+    }
+    return ret;
+}/* End BUSMASTER generated function - Utils_GetUdsTpRxCCSeqNo */
+/* Start BUSMASTER generated function - Utils_GetUdsTpRxFCHandle */
+void Utils_GetUdsTpRxFCHandle(ECU_t *e)
+{
+    STCAN_MSG canMsg = STCAN_MSG(0);
+    uint8_t canWrIdx = 0;
+
+    if (TP_TYPE_EXTENTED == e->tp.tpType) {
+        /* Set first byte as extented address */
+        canMsg.data[canWrIdx++] = e->tp.tpExAdr;
+    }
+    canMsg.data[canWrIdx++] = (uint8_t)FLOW_CONTROL;
+    canMsg.data[canWrIdx++] = (uint8_t)0;
+    canMsg.data[canWrIdx++] = (uint8_t)2; /* Set ST Min to 2ms to have enough processing
+                                             time. */
+
+    /* Next start waiting for CF */
+    e->tp.rx.state = TP_RX_CF_WAIT;
+
+    e->tp.WaitTime = 50; /* Wait 50ms for now */
+    e->tp.timeCnt = 0;   /* Reset the timer   */
+
+    /* Send the constructed frame using API */
+    canMsg.id = e->CanM.TxMsgId;
+    canMsg.isExtended = e->CanM.isExtended;
+    canMsg.dlc = 8;
+    SendMsg(canMsg);
+}/* End BUSMASTER generated function - Utils_GetUdsTpRxFCHandle */
 /* Start BUSMASTER generated function - Utils_GetUdsTpRxNewHandle */
 void Utils_GetUdsTpRxNewHandle(ECU_t *e, uint8_t *rxData)
 {
@@ -244,8 +351,19 @@ void Utils_GetUdsTpRxNewHandle(ECU_t *e, uint8_t *rxData)
     /* Multi frame handling */
     if(FIRST_FRAME == ft) {
         if(len <= sizeof(e->tp.data)) {
-            /* TODO: Update Rx and Tp States, initialize Rx, data to start further reception */
+            uint8_t rxFFlen = Utils_GetFFMaxLen(e);
 
+            /* Clear existing data, if any */
+            memset(e->tp.data, 0, sizeof(e->tp.data));
+            e->tp.CFcnt = 1; /* Next expected CF-Sequence number */
+            e->tp.len = len;
+
+            memcpy(e->tp.data, &rxData[8 - rxFFlen], rxFFlen);
+            e->tp.dPtr = rxFFlen; /* Pointer to next byte to be written */
+
+            /* Update states to indicate rx is in progress */
+            e->tp.state = TP_RX_ACTIVE;
+            e->tp.rx.state = TP_RX_FC_PENDING; /* Needs to send the FC frame */
         }
         else {
             /* Frame ignored */
@@ -273,6 +391,7 @@ void Utils_TP_HandleRx(ECU_t *e)
                 // Check New Rx message in mail box
                 Utils_GetUdsTpRxNewHandle(e, rxData);
             break;
+            case TP_RX_FC_PENDING:
             default:
             break;
         }
@@ -401,7 +520,7 @@ uint8_t Utils_GetUdsTpFCSTmin(ECU_t *e, uint8_t *f)
     }
 
     /* 0xF1 to 0xF9 UF, 100 to 900 microseconds.
-     * Equivalent to 0, since atleast 50ms wait
+     * Equivalent to 0, since atleast 1ms wait
      * by design is present */
     if( byt > 127 ) {
         ret = 0;
@@ -484,7 +603,7 @@ void Utils_TxHandleFC(ECU_t *e)
     return;
 }/* End BUSMASTER generated function - Utils_TxHandleFC */
 /* Start BUSMASTER generated function - Utils_GetSFMaxLen */
-unsigned int Utils_GetSFMaxLen(ECU_t *e)
+uint8_t Utils_GetSFMaxLen(ECU_t *e)
 {
     if (TP_TYPE_STANDARD == e->tp.tpType) {
         return 7u;
@@ -493,6 +612,16 @@ unsigned int Utils_GetSFMaxLen(ECU_t *e)
         return 6u;
     }
 }/* End BUSMASTER generated function - Utils_GetSFMaxLen */
+/* Start BUSMASTER generated function - Utils_GetFFMaxLen */
+uint8_t Utils_GetFFMaxLen(ECU_t *e)
+{
+    if (TP_TYPE_STANDARD == e->tp.tpType) {
+        return 6u;
+    }
+    else {
+        return 5u;
+    }
+}/* End BUSMASTER generated function - Utils_GetFFMaxLen */
 /* Start BUSMASTER generated function - Utils_StartTpTx */
 void Utils_StartTpTx(ECU_t *e)
 {
