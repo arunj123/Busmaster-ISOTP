@@ -259,6 +259,14 @@ void Utils_GetUdsTpRxCCHandle(ECU_t *e)
                     e->tp.rx.state = TP_RX_INACTIVE;
                 }
             }
+            else {
+                /* Abort reception */
+                e->tp.rx.state = TP_RX_INACTIVE;
+            }
+        }
+        else {
+            /* Abort reception */
+            e->tp.rx.state = TP_RX_INACTIVE;
         }
     }
     else {
@@ -385,17 +393,9 @@ void Utils_TP_HandleRx(ECU_t *e)
         memcpy(rxData, e->msgBox.data, sizeof(rxData));
         e->msgBox.isAvailable = false;
 
-        /* Handle received data according to state and frame type */
-        switch(e->tp.rx.state) {
-            case TP_RX_INACTIVE:
-                // Check New Rx message in mail box
-                Utils_GetUdsTpRxNewHandle(e, rxData);
-            break;
-            case TP_RX_FC_PENDING:
-            default:
-            break;
-        }
+        Utils_GetUdsTpRxNewHandle(e, rxData);
     }
+
 }/* End BUSMASTER generated function - Utils_TP_HandleRx */
 /* Start BUSMASTER generated function - Utils_TxHandleCF */
 void Utils_TxHandleCF(ECU_t *e)
