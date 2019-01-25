@@ -175,10 +175,15 @@ void OnMsg_All(STCAN_MSG RxMsg)
     uint8_t e;
     for (e = 0; e < NUM_ECUS; e++) {
         if (ecus[e].CanM.RxMsgId == RxMsg.id) {
-            /* Message ignored, if message box is already full */
-            if (false == ecus[e].msgBox.isAvailable) {
-                memcpy(ecus[e].msgBox.data, RxMsg.data, 8);
-                ecus[e].msgBox.isAvailable = true;
+            /* if standard addressing or if extended address matches */
+            if ( (( TP_TYPE_EXTENTED == ecus[e].tp.tpType ) && (RxMsg.data[0] == ecus[e].tp.tpExAdr) ) ||
+            ( TP_TYPE_STANDARD == ecus[e].tp.tpType ) ){
+
+                /* Message ignored, if message box is already full */
+                if (false == ecus[e].msgBox.isAvailable) {
+                    memcpy(ecus[e].msgBox.data, RxMsg.data, 8);
+                    ecus[e].msgBox.isAvailable = true;
+                }
             }
         }
     }
@@ -224,6 +229,7 @@ void Utils_TP_Cyclic_per_ecu(ECU_t *e)
         break;
     }
 
+    /* Move TP state to inactive, if TX and RX are inactive */
     if ((TP_TX_INACTIVE == e->tp.tx.state) && (TP_RX_INACTIVE == e->tp.rx.state)) {
         if (e->tp.state != TP_INACTIVE) {
             e->tp.state = TP_INACTIVE;
@@ -252,9 +258,14 @@ void Utils_GetUdsTpRxCCHandle(ECU_t *e)
 
                 if(e->tp.dPtr >= e->tp.len) {
                     
-                    /* TODO: Indicate upper layer,
-                             Add error handling, possible abort in all unexpected frames */
-                    Trace( "Multiframe reception complete." );
+                    /* RxIndication to upper layer */
+                    char pd[1000];
+                    Trace("New message Received: " );
+                    for(int i = 0; i < e->tp.len; i++) {
+                        sprintf(pd + i*3, "%02X ", e->tp.data[i]); 
+                    }
+                    Trace(pd);
+
                     /* Mark state as inactive */
                     e->tp.rx.state = TP_RX_INACTIVE;
                 }
@@ -284,10 +295,11 @@ uint8_t Utils_GetUdsTpRxCCDataPos(ECU_t *e)
     uint16_t ret;
 
     if (TP_TYPE_STANDARD == e->tp.tpType) {
-        ret = 1;
+        ret = 1; /* First byte (byte0) is used for control */
     }
     else {
-        ret = 1; /* Check if necessary to change to 2*/
+        ret = 2; /* For extended frames, first byte is 
+                  * extended address, followed by control */
     }
     return ret;
 }/* End BUSMASTER generated function - Utils_GetUdsTpRxCCDataPos */
@@ -300,7 +312,7 @@ uint8_t Utils_GetUdsTpRxCCSeqNo(ECU_t *e, uint8_t *f)
         ret = f[0] & 0x0F;
     }
     else {
-        ret = f[0] & 0x0F; /* Check if necessary to change to 1*/
+        ret = f[1] & 0x0F; /* Extended TP, first byte used as address */
     }
     return ret;
 }/* End BUSMASTER generated function - Utils_GetUdsTpRxCCSeqNo */
@@ -345,7 +357,7 @@ void Utils_GetUdsTpRxNewHandle(ECU_t *e, uint8_t *rxData)
             /* RxIndication to upper layer */
             char pd[100];
             Trace("New message Received: " );
-            for(int i = 0; i < 8; i++) {
+            for(int i = 0; i < len; i++) {
                 sprintf(pd + i*3, "%02X ", rxData[i]); 
             }
             Trace(pd);
@@ -407,11 +419,16 @@ void Utils_TxHandleCF(ECU_t *e)
         /* Reset timecounter */
         e->tp.timeCnt = 0;
 
+        /* Add exteded address */
+        if (TP_TYPE_EXTENTED == e->tp.tpType) {
+            canMsg.data[canWrIdx++] = e->tp.tpExAdr;
+        }
+
         /* Send consicutive frame */
         canMsg.data[canWrIdx++] = (uint8_t)(((uint8_t) CONSICUTIVE) | (e->tp.CFcnt & 0xF) );
 
-        if((e->tp.len - e->tp.dPtr) > 7) {
-            memcpy(&canMsg.data[canWrIdx], &e->tp.data[e->tp.dPtr], 7);
+        if((e->tp.len - e->tp.dPtr) > (8 - canWrIdx) ) {
+            memcpy(&canMsg.data[canWrIdx], &e->tp.data[e->tp.dPtr], (8 - canWrIdx));
             e->tp.tx.BlockCnt++;
 
             /* if block count reached, wait for FC */
@@ -423,7 +440,7 @@ void Utils_TxHandleCF(ECU_t *e)
             else { /* Else wait for separation time to next send */
                 e->tp.WaitTime = e->tp.tx.SeparationTime;
             }
-            e->tp.dPtr += 7; /* Increment data pointer to next place */
+            e->tp.dPtr += (8 - canWrIdx); /* Increment data pointer to next place */
         }
         else {
             /* Copy only the remaing bytes  */
