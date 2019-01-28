@@ -4,12 +4,34 @@
 /* PROTOCOL [CAN] */
 
 /* Start BUSMASTER include header */
+#include <string>
+#include <iostream>
 #include <Windows.h>
 #include <CANIncludes.h>
+#include <lua.hpp>
+#include "Python.h"
+#include <pybind11/functional.h>
+#include <pybind11/eval.h>
+#include <pybind11/embed.h>
+#include "luabinder.hpp"
 /* End BUSMASTER include header */
 
 
 /* Start BUSMASTER global variable */
+
+/* Used for python bining */
+namespace py = pybind11;
+
+void TraceWrp (const char *p) {
+    Trace((char *)p);
+}
+
+PYBIND11_EMBEDDED_MODULE(busmaster, m) {
+    m.doc() = "Access Busmaster and ISOTP "
+              "implemention node simulation from python."; // optional module docstring
+    m.def("Trace", &TraceWrp, "Adds message to the Busmaster Trace", py::arg("message") );
+
+}
 
 #define TX_INI_FC_WAIT_TIME 127
 //#define TP_MIN_WAIT_TIME    50
@@ -114,6 +136,11 @@ typedef struct ECU {
 ECU_t ecus[NUM_ECUS] = {
     {{0x7B0, 0x7B8, false}, {TP_TYPE_EXTENTED, 0x40,} },
 };
+
+/* Variables used in Lua - interface */
+lua_State *stLua;
+
+
 /* End BUSMASTER global variable */
 
 
@@ -143,6 +170,8 @@ void Utils_StartTpTx(ECU_t *e);
 void Utils_ClearTpData(ECU_t *e);
 bool Utils_SendTpResponse(EcuId_t ecu, uint8_t *data, uint16_t size);
 GCC_EXTERN void GCC_EXPORT OnKey_s(unsigned char KeyValue);
+GCC_EXTERN void GCC_EXPORT OnDLL_Load();
+GCC_EXTERN void GCC_EXPORT OnDLL_Unload();
 /* End BUSMASTER Function Prototype  */
 
 /* Start BUSMASTER Function Wrapper Prototype  */
@@ -175,6 +204,7 @@ void OnMsg_All(STCAN_MSG RxMsg)
     uint8_t e;
     for (e = 0; e < NUM_ECUS; e++) {
         if (ecus[e].CanM.RxMsgId == RxMsg.id) {
+
             /* if standard addressing or if extended address matches */
             if ( (( TP_TYPE_EXTENTED == ecus[e].tp.tpType ) && (RxMsg.data[0] == ecus[e].tp.tpExAdr) ) ||
             ( TP_TYPE_STANDARD == ecus[e].tp.tpType ) ){
@@ -257,12 +287,12 @@ void Utils_GetUdsTpRxCCHandle(ECU_t *e)
                 e->tp.dPtr += (8 - datPtr);
 
                 if(e->tp.dPtr >= e->tp.len) {
-                    
+
                     /* RxIndication to upper layer */
                     char pd[1000];
                     Trace("New message Received: " );
                     for(int i = 0; i < e->tp.len; i++) {
-                        sprintf(pd + i*3, "%02X ", e->tp.data[i]); 
+                        sprintf(pd + i*3, "%02X ", e->tp.data[i]);
                     }
                     Trace(pd);
 
@@ -645,7 +675,8 @@ void Utils_StartTpTx(ECU_t *e)
     STCAN_MSG canMsg = STCAN_MSG(0);
     uint8_t canWrIdx = 0;
     uint8_t sfLen = Utils_GetSFMaxLen(e);
-
+    
+    /* if extended type, add extended address */
     if (TP_TYPE_EXTENTED == e->tp.tpType) {
         canMsg.data[canWrIdx++] = e->tp.tpExAdr;
     }
@@ -733,4 +764,51 @@ void OnKey_s(unsigned char KeyValue)
     //Utils_SendTpResponse(0, txDataResp, 3);
     Utils_SendTpResponse(0, txDataResp, 155);
 }/* End BUSMASTER generated function - OnKey_s */
- 
+/* Start BUSMASTER generated function - OnDLL_Load */
+void OnDLL_Load()
+{
+    /* Part to initialse the Lua engine */
+    {
+        //char tmpBuf[1000] = "dofile('exec_uds.lua')";
+        //int error;
+
+        //stLua = luaL_newstate();   /* opens Lua               */
+        //luaL_openlibs(stLua); /* opens the lua libraries */
+
+        //error = luaL_loadbuffer(stLua, tmpBuf, strlen(tmpBuf), "line") ||
+        //lua_pcall(stLua, 0, 0, 0);
+        
+        //if (error) {
+        //    Trace( "%s", lua_tostring(stLua, -1));
+        //    lua_pop(stLua, 1);  /* pop error message from the stack */
+        //}
+
+        // Create lua_State
+        rf::wrapper::LuaBinder lua;
+        lua.def("Trace", TraceWrp);
+        lua.dofile("exec_uds.lua");
+    }
+
+    /* part to initialise the python engine */
+    {
+        py::scoped_interpreter guard{};
+
+        py::object scope = py::module::import("__main__").attr("__dict__");
+
+        try {
+            py::eval_file("script.py", scope);
+        }
+        catch (...){
+            Trace("Exception occoured while evaluating python file.");
+        }
+        
+    }
+
+}/* End BUSMASTER generated function - OnDLL_Load */
+/* Start BUSMASTER generated function - OnDLL_Unload */
+void OnDLL_Unload()
+{
+    /* Close lua engine */
+    //lua_close(stLua);
+
+}/* End BUSMASTER generated function - OnDLL_Unload */
