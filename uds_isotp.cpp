@@ -33,6 +33,25 @@ PYBIND11_EMBEDDED_MODULE(busmaster, m) {
 
 }
 
+typedef uint32_t CanId_t; /* Type for representing CanID, both
+                             extented and standard */
+typedef uint32_t EcuId_t;
+
+typedef uint8_t TpExtAdr_t;
+
+bool Utils_SendTpResponse(EcuId_t ecu, uint8_t *data, uint16_t size);
+
+bool SendResponse(int i, char *p, int s) {
+    return Utils_SendTpResponse((EcuId_t) i, (uint8_t *)p, (uint16_t) s);
+}
+
+PYBIND11_EMBEDDED_MODULE(isotp, m) {
+    m.doc() = "Implementation of ISOTP on a busmaster node."; // optional module docstring
+    m.def("SendResponse", &Utils_SendTpResponse, "Sends Response on CAN using IsoTp",
+          py::arg("EcuId") = 0, py::arg("data"), py::arg("DataLen") = 1);
+//py::bytes
+} 
+
 #define TX_INI_FC_WAIT_TIME 127
 //#define TP_MIN_WAIT_TIME    50
 
@@ -769,20 +788,6 @@ void OnDLL_Load()
 {
     /* Part to initialse the Lua engine */
     {
-        //char tmpBuf[1000] = "dofile('exec_uds.lua')";
-        //int error;
-
-        //stLua = luaL_newstate();   /* opens Lua               */
-        //luaL_openlibs(stLua); /* opens the lua libraries */
-
-        //error = luaL_loadbuffer(stLua, tmpBuf, strlen(tmpBuf), "line") ||
-        //lua_pcall(stLua, 0, 0, 0);
-        
-        //if (error) {
-        //    Trace( "%s", lua_tostring(stLua, -1));
-        //    lua_pop(stLua, 1);  /* pop error message from the stack */
-        //}
-
         // Create lua_State
         rf::wrapper::LuaBinder lua;
         lua.def("Trace", TraceWrp);
@@ -808,7 +813,8 @@ void OnDLL_Load()
 /* Start BUSMASTER generated function - OnDLL_Unload */
 void OnDLL_Unload()
 {
-    /* Close lua engine */
-    //lua_close(stLua);
-
+  /*int btn = MessageBox( 0, 
+               "Pressing Yes or No dosent matter" , 
+               "Question" , 
+               MB_YESNO + MB_ICONQUESTION );*/
 }/* End BUSMASTER generated function - OnDLL_Unload */
