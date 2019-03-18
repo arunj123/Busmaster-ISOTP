@@ -12,7 +12,7 @@
 /* Start BUSMASTER global variable */
 #define SEEEDKEY_ENABLED
 
-#define XCPM_REQRES_LEN 8
+#define XCPM_REQRES_LEN 100
 #define XCPM_TIMEOUT    1000
 #define XCPM_BUF_LEN    500
 
@@ -51,12 +51,54 @@ struct REQ {
 
     enum REQSTATE state;
     uint32_t time_cnt;
+    uint8_t expRx;
+    uint8_t rxCnt;
     bool hasReceived;
 }; 
 
 struct XCPM_INFO {
     uint32_t txid;
     uint32_t rxid;
+};
+
+enum DAQSTATE {
+    DAQSTATE_INI,
+    DAQSTATE_GET_PROCESSOR_INFO,
+    DAQSTATE_GET_DAQ_RESOLUTION_INFO,
+    DAQSTATE_GET_DAQ_EVENT_INFO,
+    DAQSTATE_GET_DAQ_LIST_INFO,
+    DAQSTATE_CLEAR_DAQ_LIST,
+};
+
+struct DAQEVENT {
+    uint8_t DAQ_EVENT_PROPERTIES;
+    uint8_t MAX_DAQ_LIST;
+    uint8_t name_length;
+    uint8_t time_cycle;
+    uint8_t time_unit;
+    uint8_t priority;
+    uint8_t name[20];
+};
+
+struct DAQ {
+    enum DAQSTATE state;
+    bool subcommand; /* to indicate a subcommand */
+
+/* GET_DAQ_PROCESSOR_INFO */
+    uint8_t DAQ_PROPERTIES;
+    uint16_t MAX_DAQ;
+    uint16_t MAX_EVENT_CHANNEL;
+    uint8_t MIN_DAQ;
+    uint8_t DAQ_KEY_BYTE;
+
+/* GET_DAQ_RESOLUTION_INFO */
+    uint8_t Granularity_odt_entry_size_daq;
+    uint8_t Max_odt_entry_size_daq;
+    uint8_t Timestamp_mode;
+    uint8_t Timestamp_ticks;
+
+    uint16_t eIdx;
+    struct DAQEVENT events[20];
 };
 
 struct XCPM {
@@ -70,6 +112,7 @@ struct XCPM {
     uint8_t buf2[XCPM_BUF_LEN];
 
     struct SEEDKEY s;
+    struct DAQ d;
 
     enum XCPMSTATE state;
 };
@@ -96,7 +139,8 @@ GCC_EXTERN void GCC_EXPORT OnMsg_All(STCAN_MSG RxMsg);
 void Utils_sendreceive(struct XCPM *xcpm);
 void Utils_xcpm_main(struct XCPM *xcpm);
 void Utils_getKey(uint8_t *seed, uint8_t seedlen, uint8_t *key, uint8_t *keylen);
-void Utils_SetupDAQ();
+void Utils_SetupDAQ(struct XCPM *xcpm);
+uint8_t Utils_CalcExpFrames(uint16_t totallen, uint8_t framelen);
 /* End BUSMASTER Function Prototype  */
 
 /* Start BUSMASTER Function Wrapper Prototype  */
@@ -108,7 +152,7 @@ void OnTimer_task_1( )
 {
     uint32_t idx;
 
-    /* Check all ecus */
+    /* Check all ecus */    
     for (idx = 0; idx < NUM_XCPM; idx++) {
         xcpml[idx].can = xcpmlc[idx];
         Utils_xcpm_main(&xcpml[idx]);
@@ -122,10 +166,22 @@ void OnMsg_All(STCAN_MSG RxMsg)
     /* Check all ecus */
     for (idx = 0; idx < NUM_XCPM; idx++) {
         if(xcpmlc[idx].rxid == RxMsg.id) {
-            Trace("Received %x", RxMsg.id);
-            xcpml[idx].req.hasReceived = true;
-            xcpml[idx].req.dlc = RxMsg.dlc;
-            memcpy(xcpml[idx].req.rxdata, RxMsg.data, sizeof(xcpml[idx].req.rxdata));
+
+            /* If expected receive is a single frame or, received is negative response */
+            if((xcpml[idx].req.expRx <= 1) || (0xFF != RxMsg.data[0]) ) {
+                xcpml[idx].req.hasReceived = true;
+                xcpml[idx].req.dlc = RxMsg.dlc;
+                memcpy(xcpml[idx].req.rxdata, RxMsg.data, RxMsg.dlc);
+            } else {
+                uint16_t rxptr = 1 + (xcpml[idx].req.rxCnt * 7);
+                xcpml[idx].req.rxCnt++;
+                if(xcpml[idx].req.rxCnt >= xcpml[idx].req.expRx) {
+                    xcpml[idx].req.hasReceived = true;
+                }
+                xcpml[idx].req.rxdata[0] = 0xFF;
+                
+                memcpy(&xcpml[idx].req.rxdata[ rxptr ], &RxMsg.data[1], (RxMsg.dlc-1) );
+            }
         }
     }
 }/* End BUSMASTER generated function - OnMsg_All */
@@ -141,7 +197,7 @@ void Utils_sendreceive(struct XCPM *xcpm)
 
         // Initialise message structure
         sMsg.dlc = xcpm->req.dlc;                 // Length is 8 Bytes
-        memcpy(sMsg.data, xcpm->req.txdata, sizeof(xcpm->req.rxdata) );            
+        memcpy(sMsg.data, xcpm->req.txdata, xcpm->req.dlc);            
 
         sMsg.cluster = 1;             // First CAN channel
 
@@ -169,11 +225,13 @@ void Utils_xcpm_main(struct XCPM *xcpm)
 {
     switch(xcpm->state) {
         case XCPM_IDLE:
+            //Trace("In state XCPM_IDLE");
             memset(xcpm, 0, sizeof(*xcpm));
             xcpm->state = XCPM_CONNECT;
         break;
 
         case XCPM_CONNECT:
+            //Trace("In state XCPM_CONNECT");
             if(REQSTATE_INI == xcpm->req.state) {
                 xcpm->req.txdata[0] = 0xFF;
                 xcpm->req.dlc = 1;
@@ -203,6 +261,8 @@ void Utils_xcpm_main(struct XCPM *xcpm)
         break;
 
         case XCPM_SEED:
+            //Trace("In state XCPM_SEED");
+
             if(REQSTATE_INI == xcpm->req.state) {
                 xcpm->req.txdata[0] = 0xF8;
                 xcpm->req.txdata[1] = xcpm->s.reqcnt;
@@ -234,7 +294,7 @@ void Utils_xcpm_main(struct XCPM *xcpm)
                         memcpy(&xcpm->buf1[xcpm->dptr], &xcpm->req.rxdata[2], readlen);
                         xcpm->dptr += readlen;
                         if(xcpm->dptr >= xcpm->s.slen) {
-                            xcpm->s.klen = XCPM_BUF_LEN;
+                            xcpm->s.klen = (sizeof(xcpm->buf2) > 255)? 255: sizeof(xcpm->buf2);
                             Utils_getKey(xcpm->buf1, xcpm->s.slen, xcpm->buf2, &xcpm->s.klen);
                             xcpm->state = XCPM_KEY;
                         }
@@ -252,6 +312,8 @@ void Utils_xcpm_main(struct XCPM *xcpm)
         break;
 
         case XCPM_KEY:
+            //Trace("In state XCPM_KEY");
+
             if(REQSTATE_INI == xcpm->req.state) {
                 uint8_t txlen = 6;
 
@@ -296,7 +358,9 @@ void Utils_xcpm_main(struct XCPM *xcpm)
         break;
 
         case XCPM_SETUPDAQ:
-            
+            //Trace("In state XCPM_SETUPDAQ");
+
+            Utils_SetupDAQ(xcpm);
         break;
 
         case XCPM_TEMP:
@@ -347,24 +411,150 @@ void Utils_getKey(uint8_t *seed, uint8_t seedlen, uint8_t *key, uint8_t *keylen)
 /* Start BUSMASTER generated function - Utils_SetupDAQ */
 void Utils_SetupDAQ(struct XCPM *xcpm)
 {
-    if(REQSTATE_INI == xcpm->req.state) {
-        xcpm->req.txdata[0] = 0xD6; /* Clear daq */
-        xcpm->req.dlc = 1;
-        Trace("Request daq");
+    switch(xcpm->d.state) {
+        case DAQSTATE_INI:
+            memset(&xcpm->d, 0, sizeof(xcpm->d));
+            memset(&xcpm->req, 0, sizeof(xcpm->req));
+
+            xcpm->d.state = DAQSTATE_GET_PROCESSOR_INFO;
+        break;
+
+        case DAQSTATE_GET_PROCESSOR_INFO:
+            if(REQSTATE_INI == xcpm->req.state) {
+                xcpm->req.txdata[0] = 0xDA; /* Clear daq */
+                xcpm->req.dlc = 1;
+            }
+
+            Utils_sendreceive(xcpm);
+            
+            if (REQSTATE_WAITRES == xcpm->req.state) {
+                /* do nothing */
+            } else {
+                
+                if (REQSTATE_COMPLETE == xcpm->req.state ) {
+                    if(xcpm->req.rxdata[0] == 0xFF) {
+                        xcpm->d.DAQ_PROPERTIES    = xcpm->req.rxdata[1];
+                        xcpm->d.MAX_DAQ           = xcpm->req.rxdata[2] | (xcpm->req.rxdata[3] << 8);
+                        xcpm->d.MAX_EVENT_CHANNEL = xcpm->req.rxdata[4] | (xcpm->req.rxdata[5] << 8);
+                        xcpm->d.MIN_DAQ           = xcpm->req.rxdata[6];
+
+                        xcpm->d.state = DAQSTATE_GET_DAQ_RESOLUTION_INFO;
+                    } else {
+                        xcpm->state = XCPM_IDLE;
+                    }
+                    
+                } else {
+                    xcpm->state = XCPM_IDLE;
+                }
+
+                memset(&xcpm->req, 0, sizeof(xcpm->req));
+            }
+        break;
+
+
+        case DAQSTATE_GET_DAQ_RESOLUTION_INFO:
+            if(REQSTATE_INI == xcpm->req.state) {
+                xcpm->req.txdata[0] = 0xD9; /* Clear daq */
+                xcpm->req.dlc = 1;
+            }
+
+            Utils_sendreceive(xcpm);
+            
+            if (REQSTATE_WAITRES == xcpm->req.state) {
+                /* do nothing */
+            } else {
+                
+                if (REQSTATE_COMPLETE == xcpm->req.state ) {
+                    if(xcpm->req.rxdata[0] == 0xFF) {
+                        xcpm->d.Granularity_odt_entry_size_daq = xcpm->req.rxdata[1];
+                        xcpm->d.Max_odt_entry_size_daq         = xcpm->req.rxdata[2];
+                        xcpm->d.Timestamp_mode                 = xcpm->req.rxdata[5];
+                        xcpm->d.Timestamp_ticks                = xcpm->req.rxdata[6];
+
+                        xcpm->d.state = DAQSTATE_GET_DAQ_EVENT_INFO;
+                    } else {
+                        xcpm->state = XCPM_IDLE;
+                    }
+                    
+                } else {
+                    xcpm->state = XCPM_IDLE;
+                }
+
+                memset(&xcpm->req, 0, sizeof(xcpm->req));
+            }
+        break;
+
+        case DAQSTATE_GET_DAQ_EVENT_INFO:
+            if(REQSTATE_INI == xcpm->req.state) {
+                if (xcpm->d.subcommand) {
+                    xcpm->req.txdata[0] = 0xF5; /* Upload name */
+                    xcpm->req.txdata[1] = xcpm->d.events[xcpm->d.eIdx - 1].name_length;
+                    xcpm->req.expRx = Utils_CalcExpFrames(xcpm->d.events[xcpm->d.eIdx - 1].name_length, 7);
+                    xcpm->req.dlc = 2;
+                } else {
+                    xcpm->req.txdata[0] = 0xD7; /* Clear daq */
+                    xcpm->req.txdata[1] = 0x00;
+                    xcpm->req.txdata[2] = (uint8_t)xcpm->d.eIdx;
+                    xcpm->req.txdata[3] = (uint8_t)(xcpm->d.eIdx >> 8);
+                    xcpm->d.eIdx++;
+                    xcpm->req.dlc = 4;
+                }
+            }
+
+            Utils_sendreceive(xcpm);
+            
+            if (REQSTATE_WAITRES == xcpm->req.state) {
+                /* do nothing */
+            } else {
+                
+                if (REQSTATE_COMPLETE == xcpm->req.state ) {
+                    if(xcpm->req.rxdata[0] == 0xFF) {
+                        if(xcpm->d.subcommand) {
+                            int i = 1;
+                            int j = 0;
+                            xcpm->d.subcommand = false;
+
+                            while (j < xcpm->d.events[xcpm->d.eIdx - 1].name_length) {
+                                xcpm->d.events[xcpm->d.eIdx - 1].name[j++] = xcpm->req.rxdata[i++];
+                            }
+                            char *n = (char*)xcpm->d.events[xcpm->d.eIdx - 1].name;
+                            Trace("[%0d] Name = %s", xcpm->d.eIdx-1, n);
+                            
+                            if(xcpm->d.eIdx > (xcpm->d.MAX_EVENT_CHANNEL-1)) {
+                                xcpm->state = XCPM_TEMP;
+                            }
+                        } else {
+                            xcpm->d.subcommand = true;
+                            xcpm->dptr = 0;
+
+                            xcpm->d.events[xcpm->d.eIdx - 1].DAQ_EVENT_PROPERTIES = xcpm->req.rxdata[1];
+                            xcpm->d.events[xcpm->d.eIdx - 1].MAX_DAQ_LIST = xcpm->req.rxdata[2];
+                            xcpm->d.events[xcpm->d.eIdx - 1].name_length = xcpm->req.rxdata[3];
+                            xcpm->d.events[xcpm->d.eIdx - 1].time_cycle = xcpm->req.rxdata[4];
+                            xcpm->d.events[xcpm->d.eIdx - 1].time_unit = xcpm->req.rxdata[5];
+                            xcpm->d.events[xcpm->d.eIdx - 1].priority = xcpm->req.rxdata[6];
+                        }
+                    }
+                } else {
+                    xcpm->state = XCPM_IDLE;
+                }
+
+                memset(&xcpm->req, 0, sizeof(xcpm->req));
+            }
+        break;
+
+        default:
+        xcpm->state = XCPM_IDLE;
+        break;
     }
 
-    Utils_sendreceive(xcpm);
-    
-    if (REQSTATE_WAITRES == xcpm->req.state) {
-        /* do nothing */
-    } else {
-        
-        if (REQSTATE_COMPLETE == xcpm->req.state ) {
-            xcpm->state = XCPM_TEMP;
-        } else {
-            xcpm->state = XCPM_IDLE;
-        }
-
-        memset(&xcpm->req, 0, sizeof(xcpm->req));
-    }
 }/* End BUSMASTER generated function - Utils_SetupDAQ */
+/* Start BUSMASTER generated function - Utils_CalcExpFrames */
+uint8_t Utils_CalcExpFrames(uint16_t totallen, uint8_t framelen)
+{
+    uint8_t ret = totallen / framelen;
+
+    if((ret * framelen) < totallen) ret++;
+
+    return ret;
+}/* End BUSMASTER generated function - Utils_CalcExpFrames */
