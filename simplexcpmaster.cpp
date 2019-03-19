@@ -68,6 +68,8 @@ enum DAQSTATE {
     DAQSTATE_GET_DAQ_EVENT_INFO,
     DAQSTATE_GET_DAQ_LIST_INFO,
     DAQSTATE_CLEAR_DAQ_LIST,
+    DAQSTATE_ALLOC_DAQ,
+    DAQSTATE_ALLOC_ODT,
 };
 
 struct DAQEVENT {
@@ -141,6 +143,7 @@ void Utils_xcpm_main(struct XCPM *xcpm);
 void Utils_getKey(uint8_t *seed, uint8_t seedlen, uint8_t *key, uint8_t *keylen);
 void Utils_SetupDAQ(struct XCPM *xcpm);
 uint8_t Utils_CalcExpFrames(uint16_t totallen, uint8_t framelen);
+void Utils_PrintInfo(struct XCPM *xcpm);
 /* End BUSMASTER Function Prototype  */
 
 /* Start BUSMASTER Function Wrapper Prototype  */
@@ -517,11 +520,9 @@ void Utils_SetupDAQ(struct XCPM *xcpm)
                             while (j < xcpm->d.events[xcpm->d.eIdx - 1].name_length) {
                                 xcpm->d.events[xcpm->d.eIdx - 1].name[j++] = xcpm->req.rxdata[i++];
                             }
-                            char *n = (char*)xcpm->d.events[xcpm->d.eIdx - 1].name;
-                            Trace("[%0d] Name = %s", xcpm->d.eIdx-1, n);
                             
                             if(xcpm->d.eIdx > (xcpm->d.MAX_EVENT_CHANNEL-1)) {
-                                xcpm->state = XCPM_TEMP;
+                                xcpm->d.state = DAQSTATE_CLEAR_DAQ_LIST;
                             }
                         } else {
                             xcpm->d.subcommand = true;
@@ -543,6 +544,68 @@ void Utils_SetupDAQ(struct XCPM *xcpm)
             }
         break;
 
+        case DAQSTATE_CLEAR_DAQ_LIST:
+            if(REQSTATE_INI == xcpm->req.state) {
+                xcpm->req.txdata[0] = 0xD6; /* Clear daq */
+                xcpm->req.dlc = 1;
+            }
+
+            Utils_sendreceive(xcpm);
+            
+            if (REQSTATE_WAITRES == xcpm->req.state) {
+                /* do nothing */
+            } else {
+                
+                if (REQSTATE_COMPLETE == xcpm->req.state ) {
+                    if(xcpm->req.rxdata[0] == 0xFF) {
+                        xcpm->d.state = DAQSTATE_ALLOC_DAQ;
+                    } else {
+                        xcpm->state = XCPM_IDLE;
+                    }
+                    
+                } else {
+                    xcpm->state = XCPM_IDLE;
+                }
+
+                memset(&xcpm->req, 0, sizeof(xcpm->req));
+            }
+        break;
+
+        case DAQSTATE_ALLOC_DAQ:
+            if(REQSTATE_INI == xcpm->req.state) {
+                xcpm->req.txdata[0] = 0xD5; /* Alloc daq */
+                xcpm->req.txdata[1] = 0x00;
+                xcpm->req.txdata[2] = 0x01;
+                xcpm->req.txdata[3] = 0x00;
+                xcpm->req.dlc = 4;
+            }
+
+            Utils_sendreceive(xcpm);
+            
+            if (REQSTATE_WAITRES == xcpm->req.state) {
+                /* do nothing */
+            } else {
+                
+                if (REQSTATE_COMPLETE == xcpm->req.state ) {
+                    if(xcpm->req.rxdata[0] == 0xFF) {
+                        xcpm->d.state = DAQSTATE_ALLOC_ODT;
+
+                        Utils_PrintInfo(xcpm);
+                    } else {
+                        xcpm->state = XCPM_IDLE;
+                    }
+                    
+                } else {
+                    xcpm->state = XCPM_IDLE;
+                }
+
+                memset(&xcpm->req, 0, sizeof(xcpm->req));
+            }
+        break;
+
+        case DAQSTATE_ALLOC_ODT:
+        break;
+
         default:
         xcpm->state = XCPM_IDLE;
         break;
@@ -558,3 +621,26 @@ uint8_t Utils_CalcExpFrames(uint16_t totallen, uint8_t framelen)
 
     return ret;
 }/* End BUSMASTER generated function - Utils_CalcExpFrames */
+/* Start BUSMASTER generated function - Utils_PrintInfo */
+void Utils_PrintInfo(struct XCPM *xcpm)
+{
+    Trace("DAQ_PROPERTIES = 0x%X", xcpm->d.DAQ_PROPERTIES);
+    Trace("MAX_DAQ = %u", xcpm->d.MAX_DAQ);
+    Trace("MAX_EVENT_CHANNEL = %u", xcpm->d.MAX_EVENT_CHANNEL);
+    Trace("MIN_DAQ = %u", xcpm->d.MIN_DAQ);
+    Trace("DAQ_KEY_BYTE = %u", xcpm->d.DAQ_KEY_BYTE);
+    Trace("Granularity_odt_entry_size_daq = %u", xcpm->d.Granularity_odt_entry_size_daq);
+    Trace("Max_odt_entry_size_daq = %u", xcpm->d.Max_odt_entry_size_daq);
+    Trace("Timestamp_mode = %u", xcpm->d.Timestamp_mode);
+    Trace("Timestamp_ticks = %u", xcpm->d.Timestamp_ticks);
+
+    for (int i = 0; i < xcpm->d.MAX_EVENT_CHANNEL; i++) {
+        Trace("Event %d", i);
+        Trace("[%d] DAQ_EVENT_PROPERTIES = 0x%X", i, xcpm->d.events[i].DAQ_EVENT_PROPERTIES);
+        Trace("[%d] MAX_DAQ_LIST = %u", i, xcpm->d.events[i].MAX_DAQ_LIST);
+        Trace("[%d] time_cycle = %u", i, xcpm->d.events[i].time_cycle);
+        Trace("[%d] time_unit = %u", i, xcpm->d.events[i].time_unit);
+        Trace("[%d] priority = %u", i, xcpm->d.events[i].priority);
+        Trace("[%d] name = %s", i, (char *)xcpm->d.events[i].name);
+    }
+}/* End BUSMASTER generated function - Utils_PrintInfo */
