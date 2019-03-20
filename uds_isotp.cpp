@@ -304,6 +304,7 @@ void Utils_GetUdsTpRxCCHandle(ECU_t *e)
 
                 memcpy(&e->tp.data[e->tp.dPtr], &e->msgBox.data[datPtr], 8 - datPtr);
                 e->tp.dPtr += (8 - datPtr);
+                e->tp.CFcnt++;
 
                 if(e->tp.dPtr >= e->tp.len) {
 
@@ -701,14 +702,17 @@ void Utils_StartTpTx(ECU_t *e)
     }
 
     if (e->tp.len > sfLen) {
+        
+        uint8_t ffLen = Utils_GetFFMaxLen(e);
+        
         /* Send start frame */
         canMsg.data[canWrIdx++] = (uint8_t)(((uint8_t) FIRST_FRAME) | (e->tp.len >> 8) );
         canMsg.data[canWrIdx++] = (uint8_t)(e->tp.len);
-        memcpy(&canMsg.data[canWrIdx], e->tp.data, sfLen);
+        memcpy(&canMsg.data[canWrIdx], e->tp.data, ffLen);
         e->tp.tx.state = TP_TX_FC_WAIT;
         e->tp.WaitTime = TX_INI_FC_WAIT_TIME;
         e->tp.CFcnt = 1; /* Next CF to be sent is 1 */
-        e->tp.dPtr = sfLen;
+        e->tp.dPtr = ffLen;
     }
     else {
         /* Send Single frame */
