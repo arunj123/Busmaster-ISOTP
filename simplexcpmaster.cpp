@@ -68,8 +68,8 @@ enum DAQSTATE {
     DAQSTATE_GET_DAQ_EVENT_INFO,
     DAQSTATE_GET_DAQ_LIST_INFO,
     DAQSTATE_CLEAR_DAQ_LIST,
-    DAQSTATE_ALLOC_DAQ,
-    DAQSTATE_ALLOC_ODT,
+    DAQSTATE_SENDREMOTECMDS,
+    DAQSTATE_DATA_ACQ_IN_PROG,
 };
 
 struct DAQEVENT {
@@ -101,6 +101,21 @@ struct DAQ {
 
     uint16_t eIdx;
     struct DAQEVENT events[20];
+
+    uint16_t command_ptr;
+};
+
+uint8_t daq_cmdlist[] = {
+    4 , 0xD5, 0x00, 0x01, 0x00 ,
+    5 , 0xD4, 0x00, 0x00, 0x00, 0x01 ,
+    6 , 0xD3, 0x00, 0x00, 0x00, 0x00, 0x01 ,
+    6 , 0xE2, 0x00, 0x00, 0x00, 0x00, 0x00 ,
+    8 , 0xE1, 0xFF, 0x01, 0x00, 0x54, 0xD0, 0x1B, 0x00 ,
+    8 , 0xE0, 0x10, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00 ,
+    4 , 0xDE, 0x02, 0x00, 0x00 ,
+    4 , 0xDE, 0x02, 0x00, 0x00 ,
+    1 , 0xDC ,
+    2 , 0xDD, 0x01 ,
 };
 
 struct XCPM {
@@ -558,38 +573,7 @@ void Utils_SetupDAQ(struct XCPM *xcpm)
                 
                 if (REQSTATE_COMPLETE == xcpm->req.state ) {
                     if(xcpm->req.rxdata[0] == 0xFF) {
-                        xcpm->d.state = DAQSTATE_ALLOC_DAQ;
-                    } else {
-                        xcpm->state = XCPM_IDLE;
-                    }
-                    
-                } else {
-                    xcpm->state = XCPM_IDLE;
-                }
-
-                memset(&xcpm->req, 0, sizeof(xcpm->req));
-            }
-        break;
-
-        case DAQSTATE_ALLOC_DAQ:
-            if(REQSTATE_INI == xcpm->req.state) {
-                xcpm->req.txdata[0] = 0xD5; /* Alloc daq */
-                xcpm->req.txdata[1] = 0x00;
-                xcpm->req.txdata[2] = 0x01;
-                xcpm->req.txdata[3] = 0x00;
-                xcpm->req.dlc = 4;
-            }
-
-            Utils_sendreceive(xcpm);
-            
-            if (REQSTATE_WAITRES == xcpm->req.state) {
-                /* do nothing */
-            } else {
-                
-                if (REQSTATE_COMPLETE == xcpm->req.state ) {
-                    if(xcpm->req.rxdata[0] == 0xFF) {
-                        xcpm->d.state = DAQSTATE_ALLOC_ODT;
-
+                        xcpm->d.state = DAQSTATE_SENDREMOTECMDS;
                         Utils_PrintInfo(xcpm);
                     } else {
                         xcpm->state = XCPM_IDLE;
@@ -603,7 +587,41 @@ void Utils_SetupDAQ(struct XCPM *xcpm)
             }
         break;
 
-        case DAQSTATE_ALLOC_ODT:
+        case DAQSTATE_SENDREMOTECMDS:
+            if(REQSTATE_INI == xcpm->req.state) {
+                uint8_t cmdlen = daq_cmdlist[xcpm->d.command_ptr++];
+                uint8_t cmdptr = 0;
+                while (cmdptr < cmdlen)
+                    xcpm->req.txdata[cmdptr++] = daq_cmdlist[xcpm->d.command_ptr++];
+                
+                xcpm->req.dlc = cmdlen;
+            }
+
+            Utils_sendreceive(xcpm);
+            
+            if (REQSTATE_WAITRES == xcpm->req.state) {
+                /* do nothing */
+            } else {
+                
+                if (REQSTATE_COMPLETE == xcpm->req.state ) {
+                    if(xcpm->req.rxdata[0] == 0xFF) {
+
+                        /* Exit if complete */
+                        if(xcpm->d.command_ptr >= sizeof(daq_cmdlist))
+                            xcpm->d.state = DAQSTATE_DATA_ACQ_IN_PROG;
+                    } else {
+                        xcpm->state = XCPM_IDLE;
+                    }
+                    
+                } else {
+                    xcpm->state = XCPM_IDLE;
+                }
+
+                memset(&xcpm->req, 0, sizeof(xcpm->req));
+            }
+        break;
+
+        case DAQSTATE_DATA_ACQ_IN_PROG:
         break;
 
         default:
